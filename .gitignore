@@ -1,0 +1,15 @@
+build/
+Build/
+BUILD/
+
+*.exe
+*.out
+*.app
+
+*.obj
+*.o
+*.pdb
+*.ilk
+*.exp
+*.lib
+
