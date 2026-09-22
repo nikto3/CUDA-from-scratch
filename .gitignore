@@ -1,6 +1,7 @@
 build/
 Build/
 BUILD/
+stb/
 
 *.exe
 *.out
@@ -12,4 +13,5 @@ BUILD/
 *.ilk
 *.exp
 *.lib
+*.ncu-rep
 
