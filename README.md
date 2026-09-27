@@ -18,6 +18,7 @@ relevant, profiled to verify the optimization it demonstrates.
 | CoarsTiledMatMul | tiling + thread coarsening |
 | CornerTurningMatMul | coalesced loads of a column-major matrix |
 | MatTranspose | naive vs. shared-memory + bank-conflict-free |
+| Convolution (1D/2D/3D) | naive vs. tiled with halo cells; constant memory for filters; 3D tiled variant is depthwise |
 
 ## Verification & profiling
 
