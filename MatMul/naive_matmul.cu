@@ -13,7 +13,7 @@
 // Mat1[M][N]
 // Mat2[N][K]
 __global__
-void MatMul(int* Mat1, int* Mat2, int* Res) {
+void MatMul(float* Mat1, float* Mat2, float* Res) {
 	int row = blockIdx.y * blockDim.y + threadIdx.y;
 	int col = blockIdx.x * blockDim.x + threadIdx.x;
 
@@ -31,22 +31,22 @@ int main(void) {
 
 	srand(time(NULL));
 
-	int* Mat1 = (int*)malloc(sizeof(int) * M * N);
-	int* Mat2 = (int*)malloc(sizeof(int) * N * K);
+	float* Mat1 = (float*)malloc(sizeof(float) * M * N);
+	float* Mat2 = (float*)malloc(sizeof(float) * N * K);
 	for (int i = 0; i < M * N; ++i) {
 		Mat1[i] = rand() % RANGE + 1; // 1 - 100
 	}
 	for(int i = 0; i< N * K; ++i) {
 		Mat2[i] = rand() % RANGE + 1;
 	}
-	int* Mat_d1;
-	int* Mat_d2;
-	int* Res_d;
-	cudaMalloc((void**)&Mat_d1, sizeof(int) * M * N);
-	cudaMalloc((void**)&Mat_d2, sizeof(int) * N * K);
-	cudaMalloc((void**)&Res_d, sizeof(int) * M * K);
-	cudaMemcpy(Mat_d1, Mat1, sizeof(int) * M * N, cudaMemcpyHostToDevice);
-	cudaMemcpy(Mat_d2, Mat2, sizeof(int) * N * K, cudaMemcpyHostToDevice);
+	float* Mat_d1;
+	float* Mat_d2;
+	float* Res_d;
+	cudaMalloc((void**)&Mat_d1, sizeof(float) * M * N);
+	cudaMalloc((void**)&Mat_d2, sizeof(float) * N * K);
+	cudaMalloc((void**)&Res_d, sizeof(float) * M * K);
+	cudaMemcpy(Mat_d1, Mat1, sizeof(float) * M * N, cudaMemcpyHostToDevice);
+	cudaMemcpy(Mat_d2, Mat2, sizeof(float) * N * K, cudaMemcpyHostToDevice);
 
 	cudaEvent_t Start, Stop;
 	float Milliseconds = 0.0f;
