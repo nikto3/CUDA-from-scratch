@@ -1,45 +1,14 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <time.h>
+#include "..\cuda_check.cuh"
 
 
 #define M 1024			// 1024
-#define N 2048			// 4096
+#define N 4096			// 4096
 #define K 1024			// 1024
 #define RANGE 100
 #define BLOCK_SIZE 32
-#define COARSENING_FACTOR 4
-
-#define CHECK_CUDA_ERROR(Val) Check((Val), #Val, __FILE__, __LINE__)
-#define CHECK_LAST_CUDA_ERROR() CheckLast(__FILE__, __LINE__) 
-
-
-inline 
-void Compare(float* Mat1, float* Mat2) {
-	for(int i = 0; i<M*K; ++i){
-		if(fabs(Mat1[i] - Mat2[i]) >= 1e-3f) {
-			printf("Error while multiplying matrices.\n");
-			exit(-1);
-		}
-	}
-}
-
-
-void Check(cudaError_t Err, const char* Func, const char* File, int Line) {
-	if(Err != cudaSuccess) {
-		printf("Cuda Runtime Error At %s: %d\n", File, Line);
-		printf("%s %s\n", cudaGetErrorString(Err), Func);
-	}
-}  
-
-void CheckLast(const char* File, int Line) {
-	cudaError_t Err = cudaGetLastError();
-	if(Err != cudaSuccess) {
-		printf("Cuda Runtime Error At %s: %d\n", File, Line);
-		printf("%s\n", cudaGetErrorString(Err));
-	}
-}
-
 
 float* MatMulCpu(float* Mat1, float* Mat2) {
 	float* Res = (float*)malloc(sizeof(float) * M * K);
@@ -99,58 +68,6 @@ void MatMul(float* Mat1, float* Mat2, float* Res) {
 	
 }
 
-
-// With thread coarsening
-__global__
-void MatMulCoars(float* Mat1, float* Mat2, float* Res) {
-	int Row = blockIdx.y * blockDim.y + threadIdx.y;
-	int ColStart = blockIdx.x * blockDim.x * COARSENING_FACTOR + threadIdx.x;
-	int Tx = threadIdx.x;
-	int Ty = threadIdx.y;
-	__shared__ float Mds[BLOCK_SIZE][BLOCK_SIZE];
-	__shared__ float Nds[BLOCK_SIZE][BLOCK_SIZE];
-
-	float Value[COARSENING_FACTOR];
-	for(int i = 0; i<COARSENING_FACTOR; ++i) {
-		Value[i] = 0.0f;
-	}
-	for(int Phase = 0; Phase < (N + BLOCK_SIZE - 1) / BLOCK_SIZE; ++Phase) {
-		if(Row < M && (Phase*BLOCK_SIZE + Tx) < N) {
-			Mds[Ty][Tx] = Mat1[Row*N + Phase*BLOCK_SIZE + Tx];
-		}
-		else {
-			Mds[Ty][Tx] = 0.0f;
-		}
-
-		for(int c = 0; c < COARSENING_FACTOR; ++c) {
-			int Col = ColStart + c*BLOCK_SIZE;
-
-			if((Phase*BLOCK_SIZE + Ty) < N && Col < K) {
-				Nds[Ty][Tx] = Mat2[(Phase * BLOCK_SIZE + Ty) * K + Col];
-			}
-			else {
-				Nds[Ty][Tx] = 0.0f;
-			}
-			__syncthreads(); // wait for other threads in the block to finish loading
-
-			for(int i = 0; i < BLOCK_SIZE; ++i) {
-				Value[c] += Mds[Ty][i] * Nds[i][Tx];
-			}
-
-			__syncthreads(); // wait for other threads in the block before proceeding to load new tiles
-		}
-	}
-
-	for(int c = 0; c < COARSENING_FACTOR; ++c) {
-		int Col = ColStart + c * BLOCK_SIZE;
-		if(Row < M && Col < K) {
-			Res[Row*K + Col] = Value[c];
-		}
-	}
-	
-}
-
-
 int main(void) {
 
 	srand(time(NULL));
@@ -192,23 +109,10 @@ int main(void) {
 	cudaEventRecord(Stop);
 	cudaEventSynchronize(Stop); 
 	cudaEventElapsedTime(&Milliseconds, Start, Stop); 
-	printf("Execution time (Tiled): %f ms\n", Milliseconds);
+	printf("Execution time: %f ms\n", Milliseconds);
 
 	CHECK_CUDA_ERROR(cudaMemcpy(Res, Res_d, sizeof(float) * M * K, cudaMemcpyDeviceToHost));
-	Compare(Res, MatMulRes);
-
-	GridDim.x = (K / COARSENING_FACTOR + BLOCK_SIZE - 1) / BLOCK_SIZE;
-	cudaEventRecord(Start);
-	MatMulCoars<<<GridDim, BlockDim>>>(Mat_d1, Mat_d2, Res_d);
-	cudaDeviceSynchronize();
-	CHECK_LAST_CUDA_ERROR();
-	cudaEventRecord(Stop);
-	cudaEventSynchronize(Stop); 
-	cudaEventElapsedTime(&Milliseconds, Start, Stop); 
-	printf("Execution time (Coarsened): %f ms\n", Milliseconds);
-
-	CHECK_CUDA_ERROR(cudaMemcpy(Res, Res_d, sizeof(float) * M * K, cudaMemcpyDeviceToHost));
-	Compare(Res, MatMulRes);
+	Compare(Res, MatMulRes, M*K, "Error while multiplying matrices.");
 
 	cudaEventDestroy(Start);
 	cudaEventDestroy(Stop);
