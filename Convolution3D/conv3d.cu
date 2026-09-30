@@ -3,7 +3,7 @@
 #include <time.h>
 #include "..\cuda_check.cuh"
 
-#define FILTER_SIZE 5
+#define FILTER_SIZE 3
 #define BLOCK_SIZE 32
 #define OUT_TILE (BLOCK_SIZE - (2*FILTER_SIZE))
 #define C 3     // Channel
@@ -67,6 +67,28 @@ float* Conv3DCpuDW(float* Mat, float Kernel[][2*FILTER_SIZE + 1][2*FILTER_SIZE +
     return Res;
 }    
 
+float* PyTorchConv2DCpu(float* Mat, float Kernel[][2*FILTER_SIZE + 1][2*FILTER_SIZE + 1]) {
+    float* Res = (float*)malloc(sizeof(float) * M * N);
+    for(int Row = 0; Row < M; ++Row) {
+        for(int Col = 0; Col < N; ++Col) {
+            float Value = 0.0f;
+            for(int Channel = 0; Channel < C; ++Channel) {
+                for(int FilterRow = -FILTER_SIZE; FilterRow < FILTER_SIZE + 1; ++FilterRow) {
+                    for(int FilterCol = -FILTER_SIZE; FilterCol < FILTER_SIZE + 1; ++FilterCol) {
+                        int OffsetRow = Row + FilterRow;
+                        int OffsetCol = Col + FilterCol;
+                        if(OffsetRow >= 0 && OffsetRow < M && OffsetCol >= 0 && OffsetCol < N) {
+                            Value += Mat[Channel*(M*N) + OffsetRow*N + OffsetCol]*Kernel[Channel][FilterRow+FILTER_SIZE][FilterCol+FILTER_SIZE];
+                        }
+                    }
+                }
+            }
+            Res[Row*N + Col] = Value;
+        }
+    }
+    return Res;
+}
+
 // Volumetric 3D convolution
 __global__
 void Conv3D(float* Mat, float* Res) {
@@ -126,11 +148,93 @@ void Conv3DDW(float* Mat, float* Res) {
     }
 }
 
+// For this example, there is only 1 output filter
+__global__ 
+void PyTorchConv2D(float* Mat, float* Res) {
+    int OutRow = blockIdx.y * OUT_TILE + threadIdx.y;
+    int OutCol = blockIdx.x * OUT_TILE + threadIdx.x;
+    int InRow = OutRow - FILTER_SIZE;
+    int InCol = OutCol - FILTER_SIZE;
+    __shared__ float Mds[BLOCK_SIZE][BLOCK_SIZE];
+
+    float Value = 0.0f;
+    for(int Channel = 0; Channel < C; ++Channel) {
+        if(InRow >= 0 && InRow < M && InCol >= 0 && InCol < N) {
+            Mds[threadIdx.y][threadIdx.x] = Mat[Channel*(M*N) + InRow*N + InCol];
+        }
+        else {
+            Mds[threadIdx.y][threadIdx.x] = 0.0f;
+        }
+
+        __syncthreads();
+
+        if(OutRow < M && OutCol < N && threadIdx.y < OUT_TILE && threadIdx.x < OUT_TILE) {
+            for(int FilterRow = 0; FilterRow < 2*FILTER_SIZE + 1; ++FilterRow) {
+                for(int FilterCol = 0; FilterCol < 2*FILTER_SIZE + 1; ++FilterCol) {
+                    Value += Mds[threadIdx.y+FilterRow][threadIdx.x+FilterCol]*KernelDW[Channel][FilterRow][FilterCol];
+                }
+            }
+            
+        }
+        __syncthreads(); 
+    }
+    if (OutRow < M && OutCol < N && threadIdx.y < OUT_TILE && threadIdx.x < OUT_TILE) {
+        Res[OutRow*N + OutCol] = Value;
+    }    
+}
+
+__global__ 
+void Conv3DDWCache(float* Mat, float* Res) {
+    int Row = blockIdx.y*blockDim.y + threadIdx.y;
+    int Col = blockIdx.x*blockDim.x + threadIdx.x;
+
+    __shared__ float Mds[BLOCK_SIZE][BLOCK_SIZE];
+
+    for(int Channel = 0; Channel < C; ++Channel) {
+        float Value = 0.0f;
+        if(Row < M && Col < N) {
+            Mds[threadIdx.y][threadIdx.x] = Mat[Channel*(M*N) + Row*N + Col];
+        }
+        else {
+            Mds[threadIdx.y][threadIdx.x] = 0.0f;
+        }
+
+        __syncthreads();
+
+        for(int FilterRow = 0; FilterRow < 2*FILTER_SIZE + 1; ++FilterRow) {
+            for(int FilterCol = 0; FilterCol < 2*FILTER_SIZE+1; ++FilterCol) {
+                if((int)threadIdx.x - FILTER_SIZE + FilterCol >= 0 &&
+                threadIdx.x - FILTER_SIZE + FilterCol < BLOCK_SIZE &&
+                (int)threadIdx.y - FILTER_SIZE + FilterRow >= 0 &&
+                threadIdx.y - FILTER_SIZE + FilterRow < BLOCK_SIZE
+            ) {
+                Value += Mds[threadIdx.y-FILTER_SIZE+FilterRow][threadIdx.x-FILTER_SIZE+FilterCol]*KernelDW[Channel][FilterRow][FilterCol];
+            }
+            else if(Col - FILTER_SIZE + FilterCol >= 0 &&
+                Col - FILTER_SIZE + FilterCol < N &&
+                Row - FILTER_SIZE + FilterRow >= 0 &&
+                Row - FILTER_SIZE + FilterRow < M
+            ) {
+                Value += Mat[Channel*(M*N) + (Row-FILTER_SIZE+FilterRow)*N + Col-FILTER_SIZE+FilterCol]
+                *KernelDW[Channel][FilterRow][FilterCol];
+            }
+            }
+        }
+
+        __syncthreads();
+        if(Row < M && Col < N) {
+            Res[Channel*(M*N) + Row*N + Col] = Value;
+        }
+    }
+
+}
+
 int main() {
     srand(time(NULL));
 
     float* Mat = (float*)malloc(sizeof(float) * C * M * N);
     float* Res = (float*)malloc(sizeof(float) * C * M * N);
+    float *ResTorch = (float*)malloc(sizeof(float) * M * N);
     for(int i = 0; i<C*M*N; ++i) {
         Mat[i] = rand() % RANGE * 0.1f;
     }
@@ -144,12 +248,15 @@ int main() {
     }
     float* FeatureMat = Conv3DCpu(Mat, Kernel_h);
     float* FeatureMatDW = Conv3DCpuDW(Mat, Kernel_h);
+    float* FeatureMatTorch = PyTorchConv2DCpu(Mat, Kernel_h);
     float* Mat_d;
     float* Res_d;
+    float* ResTorch_d;
     CHECK_CUDA_ERROR(cudaMalloc((void **)&Mat_d, sizeof(float) * C * M * N));
     CHECK_CUDA_ERROR(cudaMemcpyToSymbol(Kernel, Kernel_h, sizeof(float) * (2*FILTER_SIZE + 1)*(2*FILTER_SIZE + 1)*(2*FILTER_SIZE + 1)));
     CHECK_CUDA_ERROR(cudaMemcpyToSymbol(KernelDW, Kernel_h, sizeof(float) * C *(2*FILTER_SIZE + 1)*(2*FILTER_SIZE + 1)));
     CHECK_CUDA_ERROR(cudaMalloc((void **)&Res_d, sizeof(float) * C * M * N));
+    CHECK_CUDA_ERROR(cudaMalloc((void **)&ResTorch_d, sizeof(float) * M * N));
     CHECK_CUDA_ERROR(cudaMemcpy(Mat_d, Mat, sizeof(float) * C * M * N, cudaMemcpyHostToDevice));
 
     dim3 GridDim((N + BLOCK_SIZE - 1) / BLOCK_SIZE, (M + BLOCK_SIZE - 1) / BLOCK_SIZE, C);
@@ -181,7 +288,6 @@ int main() {
 
     GridDim.x = (N + OUT_TILE - 1) / OUT_TILE;
     GridDim.y = (M + OUT_TILE - 1) / OUT_TILE;
-    GridDim.z = C;
     cudaEventRecord(Start);
     Conv3DDW<<<GridDim, BlockDim>>>(Mat_d, Res_d);
     cudaDeviceSynchronize();
@@ -197,11 +303,56 @@ int main() {
 
     Compare(Res, FeatureMatDW, C*M*N, "Error while applying 3d convolutional filter to matrix.");
 
+    // Depthwise Tiled Cached
+    cudaEventCreate(&Start);
+    cudaEventCreate(&Stop);
+
+    GridDim.x = (N + BLOCK_SIZE - 1) / BLOCK_SIZE;
+    GridDim.y = (M + BLOCK_SIZE - 1) / BLOCK_SIZE;
+    cudaEventRecord(Start);
+    Conv3DDWCache<<<GridDim, BlockDim>>>(Mat_d, Res_d);
+    cudaDeviceSynchronize();
+    CHECK_LAST_CUDA_ERROR();
+
+    cudaEventRecord(Stop);
+    cudaEventSynchronize(Stop);
+
+    cudaEventElapsedTime(&Milliseconds, Start, Stop);
+    printf("Execution time (Tiled Cached DepthWise): %f ms\n", Milliseconds);
+
+    CHECK_CUDA_ERROR(cudaMemcpy(Res, Res_d, sizeof(float) * C * M * N, cudaMemcpyDeviceToHost));
+
+    Compare(Res, FeatureMatDW, C*M*N, "Error while applying 3d convolutional filter to matrix.");
+
+    // PyTorch 2D
+    cudaEventCreate(&Start);
+    cudaEventCreate(&Stop);
+
+    GridDim.x = (N + OUT_TILE - 1) / OUT_TILE;
+    GridDim.y = (M + OUT_TILE - 1) / OUT_TILE;
+    cudaEventRecord(Start);
+    PyTorchConv2D<<<GridDim, BlockDim>>>(Mat_d, ResTorch_d);
+    cudaDeviceSynchronize();
+    CHECK_LAST_CUDA_ERROR();
+
+    cudaEventRecord(Stop);
+    cudaEventSynchronize(Stop);
+
+    cudaEventElapsedTime(&Milliseconds, Start, Stop);
+    printf("Execution time (PyTorch 2D like): %f ms\n", Milliseconds);
+
+    CHECK_CUDA_ERROR(cudaMemcpy(ResTorch, ResTorch_d, sizeof(float) * M * N, cudaMemcpyDeviceToHost));
+
+    Compare(ResTorch, FeatureMatTorch, M*N, "Error while applying 3d convolutional filter to matrix.");
+
     cudaFree(Mat_d);
     cudaFree(Res_d);
+    cudaFree(ResTorch_d);
     free(Mat);
     free(Res);
+    free(ResTorch);
     free(FeatureMat);
     free(FeatureMatDW);
+    free(FeatureMatTorch);
     return 0;
 }

@@ -3,7 +3,7 @@
 #include <time.h>
 #include "..\cuda_check.cuh"
 
-#define FILTER_SIZE 5
+#define FILTER_SIZE 4 // lower so that number of registers stays < 32 because of occupancy
 #define BLOCK_SIZE 32
 #define OUT_TILE (BLOCK_SIZE - (2*FILTER_SIZE))
 #define M 1024
@@ -85,6 +85,46 @@ void Conv2DTiled(float* Mat, float* Res) {
     }
 }
 
+__global__ 
+void Conv2DTiledCache(float* Mat, float* Res) {
+    int Row = blockIdx.y*blockDim.y + threadIdx.y;
+    int Col = blockIdx.x*blockDim.x + threadIdx.x;
+
+    __shared__ float Mds[BLOCK_SIZE][BLOCK_SIZE];
+
+    if(Row < M && Col < N) {
+        Mds[threadIdx.y][threadIdx.x] = Mat[Row*N + Col];
+    }
+    else {
+        Mds[threadIdx.y][threadIdx.x] = 0.0f;
+    }
+
+    __syncthreads();
+
+    if(Row < M && Col < N) {
+        float Value = 0.0f;
+        for(int FilterRow = 0; FilterRow < 2*FILTER_SIZE + 1; ++FilterRow) {
+            for(int FilterCol = 0; FilterCol < 2*FILTER_SIZE + 1; ++FilterCol) {
+                if((int)threadIdx.x - FILTER_SIZE + FilterCol >= 0 && 
+                    threadIdx.x - FILTER_SIZE + FilterCol < BLOCK_SIZE && 
+                    (int)threadIdx.y - FILTER_SIZE + FilterRow >= 0 && 
+                    threadIdx.y - FILTER_SIZE + FilterRow < BLOCK_SIZE
+                ) {
+                    Value += Mds[threadIdx.y-FILTER_SIZE+FilterRow][threadIdx.x-FILTER_SIZE+FilterCol]*Kernel[FilterRow][FilterCol];
+                }
+                else if (Col - FILTER_SIZE + FilterCol >= 0 && 
+                    Col - FILTER_SIZE + FilterCol < N && 
+                    Row - FILTER_SIZE + FilterRow >= 0 && 
+                    Row - FILTER_SIZE + FilterRow < M
+                ) {
+                    Value += Mat[(Row-FILTER_SIZE+FilterRow)*N + Col-FILTER_SIZE+FilterCol]*Kernel[FilterRow][FilterCol];
+                }
+            }
+        }
+        Res[Row*N + Col] = Value;
+    }
+}
+
 int main() {
     srand(time(NULL));
 
@@ -151,6 +191,28 @@ int main() {
     CHECK_CUDA_ERROR(cudaMemcpy(Res, Res_d, sizeof(float) * M * N, cudaMemcpyDeviceToHost));
 
     Compare(Res, FeatureMat, M*N, "Error while applying 2d convolutional filter to matrix.");
+
+    // Tiled + Cached
+    cudaEventCreate(&Start);
+    cudaEventCreate(&Stop);
+
+    GridDim.x = (N + BLOCK_SIZE - 1) / BLOCK_SIZE;
+    GridDim.y = (M + BLOCK_SIZE - 1) / BLOCK_SIZE;
+    cudaEventRecord(Start);
+    Conv2DTiledCache<<<GridDim, BlockDim>>>(Mat_d, Res_d);
+    cudaDeviceSynchronize();
+    CHECK_LAST_CUDA_ERROR();
+
+    cudaEventRecord(Stop);
+    cudaEventSynchronize(Stop);
+
+    cudaEventElapsedTime(&Milliseconds, Start, Stop);
+    printf("Execution time (Tiled+Cached): %f ms\n", Milliseconds);
+
+    CHECK_CUDA_ERROR(cudaMemcpy(Res, Res_d, sizeof(float) * M * N, cudaMemcpyDeviceToHost));
+
+    Compare(Res, FeatureMat, M*N, "Error while applying 2d convolutional filter to matrix.");
+
     cudaFree(Mat_d);
     cudaFree(Res_d);
     free(Mat);

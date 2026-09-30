@@ -70,6 +70,35 @@ void Conv1DTiled(float* Vec, float* Res) {
    
 }
 
+__global__
+void Conv1DTiledCache(float* Vec, float* Res) {
+    int Index = blockIdx.x * blockDim.x + threadIdx.x;
+
+    __shared__ float Mds[BLOCK_SIZE];
+
+    if(Index < N) {
+        Mds[threadIdx.x] = Vec[Index];
+    }
+    else {
+        Mds[threadIdx.x] = 0.0f;
+    }
+
+    __syncthreads();
+
+    if(Index < N) {
+        float Value = 0.0f;
+        for(int FilterIndex = 0; FilterIndex < 2*FILTER_SIZE + 1; ++FilterIndex) {
+            if((int)threadIdx.x - FILTER_SIZE + FilterIndex >= 0 && (int)threadIdx.x - FILTER_SIZE + FilterIndex < BLOCK_SIZE) {
+                Value += Mds[threadIdx.x - FILTER_SIZE +FilterIndex] * Kernel[FilterIndex];
+            }
+            else if(Index - FILTER_SIZE + FilterIndex >= 0 && Index - FILTER_SIZE + FilterIndex < N) {
+                Value += Vec[Index - FILTER_SIZE + FilterIndex] * Kernel[FilterIndex];
+            }
+        }
+        Res[Index] = Value;
+    }
+}
+
 int main() {
     srand(time(NULL));
 
@@ -128,6 +157,26 @@ int main() {
 
     cudaEventElapsedTime(&Milliseconds, Start, Stop);
     printf("Execution time (Tiled): %f ms\n", Milliseconds);
+
+    CHECK_CUDA_ERROR(cudaMemcpy(Res, Res_d, sizeof(float) * N, cudaMemcpyDeviceToHost));
+
+    Compare(Res, FeatureVec, N, "Error while applying 1d convolutional filter to vector.");
+
+    // Tiled + Cache
+    GridDim.x = (N + BLOCK_SIZE - 1) / BLOCK_SIZE;
+    cudaEventCreate(&Start);
+    cudaEventCreate(&Stop);
+
+    cudaEventRecord(Start);
+    Conv1DTiledCache<<<GridDim, BlockDim>>>(Vec_d, Res_d);
+    cudaDeviceSynchronize();
+    CHECK_LAST_CUDA_ERROR();
+
+    cudaEventRecord(Stop);
+    cudaEventSynchronize(Stop);
+
+    cudaEventElapsedTime(&Milliseconds, Start, Stop);
+    printf("Execution time (Tiled + Cache): %f ms\n", Milliseconds);
 
     CHECK_CUDA_ERROR(cudaMemcpy(Res, Res_d, sizeof(float) * N, cudaMemcpyDeviceToHost));
 
