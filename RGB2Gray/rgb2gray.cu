@@ -27,7 +27,7 @@ __global__ void rgb2grayscale(unsigned char *img, unsigned char *gray, int x, in
 int main(int argc, const char *argv[])
 {
   int x, y, n;
-  unsigned char *img = stbi_load("..\\img.jpg", &x, &y, &n, 0); // 3 zbog rgb
+  unsigned char *img = stbi_load("..\\img.jpg", &x, &y, &n, 0); 
 
   if(img == NULL)
   {
