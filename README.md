@@ -19,6 +19,7 @@ relevant, profiled to verify the optimization it demonstrates.
 | CornerTurningMatMul | coalesced loads of a column-major matrix |
 | MatTranspose | naive vs. shared-memory + bank-conflict-free |
 | Convolution (1D/2D/3D) | naive vs. tiled with halo cells; constant memory for filters; 3D tiled variant is depthwise |
+| Stencil | 7-point 3D stencil: naive vs shared tile vs thread coarsening vs register tiling; C coefficients in constant memory |
 
 ## Verification & profiling
 
@@ -37,3 +38,6 @@ Naive version is the slowest one because of uncoalesced write to output matrix. 
 * **Branch Divergence**
 ![Branch Divergence](Convolution3D/branch_divergence.png)
 Volumetric 3D convolution performs ~196K branch instructions, while 3D depthwise cached version performs ~67M. Main reason for this massive difference is `if/else` block inside two inner-most for loops, moving along kernel dimensions. Because branch efficiency is only ~71%, many of these branches diverge within a warp, so both paths execute one after another, which slows the kernel.
+* **Stencil Tiling and Register Reuse**
+![Stencil Tiling and Register Reuse](Stencil/stencil_ncu.png)
+Profiling the four 7-point 3D stencil implementations on a Tesla T4 shows that register tiling was fastest in this run (~0.78 ms), slightly ahead of the naive kernel (~0.84 ms). Full 3D shared-memory tiling was slower (~1.94 ms), while the thread-coarsened implementation took ~1.08 ms.
